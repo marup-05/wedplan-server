@@ -30,7 +30,10 @@ const connectedClient = await connectToMongoDB();
 // database and collections
 const database = connectedClient.db("wedPlan");
 const users = database.collection("user");
-
+const sessions = database.collection("session");
+const services = database.collection("services");
+const bookings = database.collection("bookings");
+const transactions = database.collection("transactions");
 
 // root api
 app.get("/", (req, res) => {

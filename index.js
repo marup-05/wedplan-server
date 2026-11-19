@@ -1,3 +1,4 @@
+
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -26,9 +27,21 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB();
 
+// database and collections
+const database = connectedClient.db("wedPlan");
+const users = database.collection("user");
+
+
 // root api
 app.get("/", (req, res) => {
   res.send("WedPlan is planning!");
+});
+
+// users related apis
+app.get("/users", async (req, res) => {
+  const cursor = users.find({});
+  const result = await cursor.toArray();
+  res.send(result);
 });
 
 app.listen(port, () => {

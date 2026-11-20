@@ -144,6 +144,38 @@ app.patch("/services/:id", async (req, res) => {
   res.send({ message: "Service updated successfully" });
 });
 
+// service availability api
+app.patch("/services/:id/availability", async (req, res) => {
+  const { id } = req.params;
+  const { vendorId, isActive } = req.body;
+
+  if (!validId(id) || !validId(vendorId) || typeof isActive !== "boolean")
+    return res.status(400).send({ message: "Invalid service ID or availability" });
+
+  const service = await services.findOne({ _id: new ObjectId(id), vendorId });
+  if (!service) return res.status(404).send({ message: "Service not found" });
+
+  if (isActive && service.status === "Approved") {
+    const vendor = await getVendor(vendorId);
+
+    if (
+      (vendor?.subscriptionPlan || "Free") !== "Premium" &&
+      await countActiveServices(vendorId, id) >= 3
+    ) {
+      return res.status(403).send({
+        message: "Free plan allows only 3 active services. Upgrade to Premium.",
+      });
+    }
+  }
+
+  await services.updateOne(
+    { _id: new ObjectId(id), vendorId },
+    { $set: { isActive } }
+  );
+
+  res.send({ message: "Availability updated successfully" });
+});
+
 
 app.listen(PORT, () => console.log(`WedPlan is running on port ${PORT}`));
 

@@ -176,6 +176,49 @@ app.patch("/services/:id/availability", async (req, res) => {
   res.send({ message: "Availability updated successfully" });
 });
 
+// delete service api
+app.delete("/services/:id", async (req, res) => {
+  const { id } = req.params;
+  const { vendorId } = req.body;
+
+  if (!validId(id) || !validId(vendorId))
+    return res.status(400).send({ message: "Invalid service or vendor ID" });
+
+  const result = await services.deleteOne({
+    _id: new ObjectId(id), vendorId,
+  });
+
+  if (!result.deletedCount)
+    return res.status(404).send({ message: "Service not found" });
+
+  res.send({ message: "Service deleted successfully" });
+});
+
+// vendor dashboard api
+app.get("/vendor/:vendorId/dashboard", async (req, res) => {
+  const { vendorId } = req.params;
+
+  if (!validId(vendorId))
+    return res.status(400).send({ message: "Invalid vendor ID" });
+
+  const vendor = await getVendor(vendorId);
+  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+
+  const [totalServices, activeServices, pendingRequests, acceptedBookings] =
+    await Promise.all([
+      services.countDocuments({ vendorId }),
+      countActiveServices(vendorId),
+      bookings.countDocuments({ vendorId, status: "Pending" }),
+      bookings.countDocuments({ vendorId, status: "Accepted" }),
+    ]);
+
+  res.send({
+    totalServices, activeServices, pendingRequests, acceptedBookings,
+    subscriptionPlan: vendor.subscriptionPlan || "Free",
+  });
+});
+
+
 
 app.listen(PORT, () => console.log(`WedPlan is running on port ${PORT}`));
 

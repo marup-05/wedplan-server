@@ -2,53 +2,149 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
-const port = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5000;
 
-// middleware
 app.use(express.json());
 app.use(cors());
 
 const client = new MongoClient(
-  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`,
+  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`
 );
 
-export async function connectToMongoDB() {
-  try {
-    await client.connect();
-    console.log("You successfully connected to MongoDB!");
-    return client;
-  } catch (err) {
-    console.dir(err);
-  }
-}
+await client.connect();
+console.log("Connected to MongoDB!");
 
-const connectedClient = await connectToMongoDB();
-
-// database and collections
-const database = connectedClient.db("wedPlan");
+const database = client.db("wedPlan");
 const users = database.collection("user");
-const sessions = database.collection("session");
 const services = database.collection("services");
 const bookings = database.collection("bookings");
 const transactions = database.collection("transactions");
 
+// reusable helpers
+const getVendor = (id) =>
+  users.findOne({ _id: new ObjectId(id), role: "vendor" });
+
+const countActiveServices = (vendorId, excludeId) =>
+  services.countDocuments({
+    vendorId,
+    status: "Approved",
+    isActive: true,
+    ...(excludeId && { _id: { $ne: new ObjectId(excludeId) } }),
+  });
+
+const validId = (id) => ObjectId.isValid(id);
+
 // root api
-app.get("/", (req, res) => {
-  res.send("WedPlan is planning!");
-});
+app.get("/", (req, res) => res.send("WedPlan is planning!"));
 
-// users related apis
+// users api (testing only)
 app.get("/users", async (req, res) => {
-  const cursor = users.find({});
-  const result = await cursor.toArray();
-  res.send(result);
+  res.send(await users.find({}).toArray());
 });
 
-app.listen(port, () => {
-  console.log(`WedPlan is running on port ${port}`);
+// public services api
+app.get("/services", async (req, res) => {
+  res.send(await services.find({ status: "Approved", isActive: true }).toArray());
 });
+
+// vendor subscription api
+app.get("/vendor/:vendorId/subscription", async (req, res) => {
+  const { vendorId } = req.params;
+
+  if (!validId(vendorId))
+    return res.status(400).send({ message: "Invalid vendor ID" });
+
+  const vendor = await getVendor(vendorId);
+  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+
+  const plan = vendor.subscriptionPlan || "Free";
+
+  res.send({
+    plan,
+    serviceLimit: plan === "Premium" ? "Unlimited" : 3,
+    canUpgrade: plan !== "Premium",
+  });
+});
+
+// vendor own services api
+app.get("/vendor/:vendorId/services", async (req, res) => {
+  const { vendorId } = req.params;
+
+  if (!validId(vendorId))
+    return res.status(400).send({ message: "Invalid vendor ID" });
+
+  if (!(await getVendor(vendorId)))
+    return res.status(404).send({ message: "Vendor not found" });
+
+  res.send(await services.find({ vendorId }).sort({ createdAt: -1 }).toArray());
+});
+
+// add service api
+app.post("/services", async (req, res) => {
+  const { vendorId, serviceName, category, description, price, location, images } = req.body;
+
+  if (
+    !validId(vendorId) || !serviceName?.trim() || !category ||
+    !description?.trim() || !location?.trim() ||
+    !Array.isArray(images) || !images.length ||
+    !Number.isFinite(Number(price)) || Number(price) <= 0
+  ) {
+    return res.status(400).send({ message: "Please provide valid service details and images" });
+  }
+
+  const vendor = await getVendor(vendorId);
+  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+
+  if (
+    (vendor.subscriptionPlan || "Free") !== "Premium" &&
+    await countActiveServices(vendorId) >= 3
+  ) {
+    return res.status(403).send({
+      message: "Free plan allows only 3 active services. Upgrade to Premium.",
+    });
+  }
+
+  const result = await services.insertOne({
+    vendorId, serviceName, category, description,
+    price: Number(price), location, images,
+    status: "Pending", isActive: true, createdAt: new Date(),
+  });
+
+  res.send({
+    message: "Service submitted. Waiting for admin approval.",
+    insertedId: result.insertedId,
+  });
+});
+
+// update service api
+app.patch("/services/:id", async (req, res) => {
+  const { id } = req.params;
+  const { vendorId, serviceName, category, description, price, location, images } = req.body;
+
+  if (
+    !validId(id) || !validId(vendorId) ||
+    !serviceName?.trim() || !category || !description?.trim() ||
+    !location?.trim() || !Array.isArray(images) || !images.length ||
+    !Number.isFinite(Number(price)) || Number(price) <= 0
+  ) {
+    return res.status(400).send({ message: "Invalid service details or ID" });
+  }
+
+  const result = await services.updateOne(
+    { _id: new ObjectId(id), vendorId },
+    { $set: { serviceName, category, description, price: Number(price), location, images } }
+  );
+
+  if (!result.matchedCount)
+    return res.status(404).send({ message: "Service not found" });
+
+  res.send({ message: "Service updated successfully" });
+});
+
+
+app.listen(PORT, () => console.log(`WedPlan is running on port ${PORT}`));
 
 export default app;

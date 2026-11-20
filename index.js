@@ -218,7 +218,59 @@ app.get("/vendor/:vendorId/dashboard", async (req, res) => {
   });
 });
 
+// vendor booking requests api
+app.get("/vendor/:vendorId/bookings", async (req, res) => {
+  const { vendorId } = req.params;
 
+  if (!validId(vendorId))
+    return res.status(400).send({ message: "Invalid vendor ID" });
+
+  if (!(await getVendor(vendorId)))
+    return res.status(404).send({ message: "Vendor not found" });
+
+  const result = await bookings.find({ vendorId }).sort({ createdAt: -1 }).toArray();
+
+  const details = await Promise.all(result.map(async (booking) => {
+    const service = validId(booking.serviceId)
+      ? await services.findOne({ _id: new ObjectId(booking.serviceId) })
+      : null;
+
+    const customer = validId(booking.customerId)
+      ? await users.findOne(
+          { _id: new ObjectId(booking.customerId) },
+          { projection: { name: 1, email: 1, image: 1 } }
+        )
+      : null;
+
+    return { ...booking, service, customer };
+  }));
+
+  res.send(details);
+});
+
+// vendor accept or reject booking api
+app.patch("/vendor/:vendorId/bookings/:bookingId/status", async (req, res) => {
+  const { vendorId, bookingId } = req.params;
+  const { status } = req.body;
+
+  if (!validId(vendorId) || !validId(bookingId) ||
+      !["Accepted", "Rejected"].includes(status)) {
+    return res.status(400).send({ message: "Invalid ID or booking status" });
+  }
+
+  if (!(await getVendor(vendorId)))
+    return res.status(404).send({ message: "Vendor not found" });
+
+  const result = await bookings.updateOne(
+    { _id: new ObjectId(bookingId), vendorId, status: "Pending" },
+    { $set: { status } }
+  );
+
+  if (!result.matchedCount)
+    return res.status(404).send({ message: "Booking not found or no longer Pending" });
+
+  res.send({ message: `Booking ${status.toLowerCase()} successfully` });
+});
 
 app.listen(PORT, () => console.log(`WedPlan is running on port ${PORT}`));
 

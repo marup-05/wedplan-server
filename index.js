@@ -686,7 +686,151 @@ app.get("/admin/:adminId/services", async (req, res) => {
   res.send(details);
 });
 
+// admin approve, reject or change service availability api
 
+app.patch("/admin/:adminId/services/:serviceId/status", async (req, res) => {
+  const { adminId, serviceId } = req.params;
+  const { status, isActive } = req.body;
+
+  if (!validId(adminId) || !validId(serviceId))
+    return res.status(400).send({ message: "Invalid admin or service ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  if (
+    status !== undefined &&
+    !["Pending", "Approved", "Rejected"].includes(status)
+  ) {
+    return res.status(400).send({ message: "Invalid service status" });
+  }
+
+  if (isActive !== undefined && typeof isActive !== "boolean")
+    return res.status(400).send({ message: "Invalid availability status" });
+
+  if (status === undefined && isActive === undefined)
+    return res.status(400).send({ message: "Provide status or isActive" });
+
+  const service = await services.findOne({
+    _id: new ObjectId(serviceId),
+  });
+
+  if (!service) return res.status(404).send({ message: "Service not found" });
+
+  if (
+    isActive !== undefined &&
+    service.status !== "Approved" &&
+    status === undefined
+  )
+    return res.status(400).send({
+      message: "Only approved services can change availability",
+    });
+
+  let updatedStatus = status ?? service.status;
+
+  let updatedActive =
+    isActive !== undefined
+      ? isActive
+      : status !== undefined
+        ? status === "Approved"
+        : service.isActive;
+
+  if (updatedStatus !== "Approved") updatedActive = false;
+
+  if (updatedStatus === "Approved" && updatedActive) {
+    if (!validId(service.vendorId))
+      return res.status(400).send({ message: "Invalid service vendor ID" });
+
+    const vendor = await getVendor(service.vendorId);
+
+    if (!vendor)
+      return res.status(404).send({ message: "Service vendor not found" });
+
+    if (
+      (vendor.subscriptionPlan || "Free") !== "Premium" &&
+      (await countActiveServices(service.vendorId, serviceId)) >= 3
+    ) {
+      return res.status(403).send({
+        message:
+          "This vendor has reached the Free plan limit of 3 active services.",
+      });
+    }
+  }
+
+  await services.updateOne(
+    { _id: new ObjectId(serviceId) },
+    {
+      $set: {
+        status: updatedStatus,
+        isActive: updatedActive,
+        updatedAt: new Date(),
+      },
+    },
+  );
+
+  res.send({
+    message: "Service status updated successfully",
+    status: updatedStatus,
+    isActive: updatedActive,
+  });
+});
+
+// admin delete inappropriate service api
+
+app.delete("/admin/:adminId/services/:serviceId", async (req, res) => {
+  const { adminId, serviceId } = req.params;
+
+  if (!validId(adminId) || !validId(serviceId))
+    return res.status(400).send({ message: "Invalid admin or service ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  const result = await services.deleteOne({
+    _id: new ObjectId(serviceId),
+  });
+
+  if (!result.deletedCount)
+    return res.status(404).send({ message: "Service not found" });
+
+  res.send({ message: "Service deleted successfully" });
+});
+
+// admin transactions list api (read only)
+
+app.get("/admin/:adminId/transactions", async (req, res) => {
+  const { adminId } = req.params;
+
+  if (!validId(adminId))
+    return res.status(400).send({ message: "Invalid admin ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  const result = await transactions.find({}).sort({ createdAt: -1 }).toArray();
+
+  const details = await Promise.all(
+    result.map(async (transaction) => {
+      const vendor = validId(transaction.vendorId)
+        ? await users.findOne(
+            { _id: new ObjectId(transaction.vendorId) },
+            {
+              projection: {
+                name: 1,
+                email: 1,
+                image: 1,
+                businessName: 1,
+              },
+            },
+          )
+        : null;
+
+      return { ...transaction, vendor };
+    }),
+  );
+
+  res.send(details);
+});
 
 // server
 

@@ -1,3 +1,4 @@
+
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -14,7 +15,6 @@ const client = new MongoClient(
 );
 
 await client.connect();
-
 console.log("Connected to MongoDB!");
 
 const database = client.db("wedPlan");
@@ -26,11 +26,28 @@ const transactions = database.collection("transactions");
 
 // reusable helpers
 
+const validId = (id) => ObjectId.isValid(id);
+
 const getVendor = (id) =>
-  users.findOne({ _id: new ObjectId(id), role: "vendor" });
+  users.findOne({
+    _id: new ObjectId(id),
+    role: "vendor",
+    isBlocked: { $ne: true },
+  });
 
 const getAdmin = (id) =>
-  users.findOne({ _id: new ObjectId(id), role: "admin" });
+  users.findOne({
+    _id: new ObjectId(id),
+    role: "admin",
+    isBlocked: { $ne: true },
+  });
+
+const getCustomer = (id) =>
+  users.findOne({
+    _id: new ObjectId(id),
+    role: "customer",
+    isBlocked: { $ne: true },
+  });
 
 const countActiveServices = (vendorId, excludeId) =>
   services.countDocuments({
@@ -40,9 +57,8 @@ const countActiveServices = (vendorId, excludeId) =>
     ...(excludeId && { _id: { $ne: new ObjectId(excludeId) } }),
   });
 
-const validId = (id) => ObjectId.isValid(id);
-
-const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRegex = (value) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // root api
 
@@ -51,10 +67,39 @@ app.get("/", (req, res) => res.send("WedPlan is planning!"));
 // ==================== PUBLIC SERVICES APIs ====================
 
 // all approved and active services
+// blocked vendors' services will not be shown
 
 app.get("/services", async (req, res) => {
+  const allServices = await services
+    .find({ status: "Approved", isActive: true })
+    .toArray();
+
+  const vendorIds = [
+    ...new Set(
+      allServices
+        .map((service) => service.vendorId)
+        .filter((id) => validId(id)),
+    ),
+  ];
+
+  const blockedVendors = await users
+    .find(
+      {
+        _id: { $in: vendorIds.map((id) => new ObjectId(id)) },
+        isBlocked: true,
+      },
+      { projection: { _id: 1 } },
+    )
+    .toArray();
+
+  const blockedVendorIds = new Set(
+    blockedVendors.map((vendor) => vendor._id.toString()),
+  );
+
   res.send(
-    await services.find({ status: "Approved", isActive: true }).toArray(),
+    allServices.filter(
+      (service) => !blockedVendorIds.has(service.vendorId),
+    ),
   );
 });
 
@@ -77,6 +122,10 @@ app.get("/services/:id", async (req, res) => {
     return res.status(404).send({ message: "Service not found" });
   }
 
+  if (!validId(service.vendorId) || !(await getVendor(service.vendorId))) {
+    return res.status(404).send({ message: "Service not found" });
+  }
+
   res.send(service);
 });
 
@@ -85,8 +134,14 @@ app.get("/services/:id", async (req, res) => {
 // customer creates booking request
 
 app.post("/bookings", async (req, res) => {
-  const { serviceId, vendorId, customerId, eventDate, eventLocation, message } =
-    req.body;
+  const {
+    serviceId,
+    vendorId,
+    customerId,
+    eventDate,
+    eventLocation,
+    message,
+  } = req.body;
 
   if (
     !validId(serviceId) ||
@@ -110,27 +165,31 @@ app.post("/bookings", async (req, res) => {
     });
   }
 
-  const customer = await users.findOne({
-    _id: new ObjectId(customerId),
-    role: "customer",
-  });
+  const customer = await getCustomer(customerId);
 
   if (!customer) {
-    return res.status(404).send({ message: "Customer not found" });
+    return res.status(403).send({
+      message: "Customer account is blocked or unavailable",
+    });
+  }
+
+  const vendor = await getVendor(vendorId);
+
+  if (!vendor) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
   }
 
   const service = await services.findOne({
     _id: new ObjectId(serviceId),
     status: "Approved",
     isActive: true,
+    vendorId,
   });
 
   if (!service) {
     return res.status(404).send({ message: "Service not available" });
-  }
-
-  if (service.vendorId !== vendorId) {
-    return res.status(400).send({ message: "Invalid vendor ID" });
   }
 
   if (customerId === vendorId) {
@@ -178,12 +237,17 @@ app.post("/bookings", async (req, res) => {
 app.get("/vendor/:vendorId/subscription", async (req, res) => {
   const { vendorId } = req.params;
 
-  if (!validId(vendorId))
+  if (!validId(vendorId)) {
     return res.status(400).send({ message: "Invalid vendor ID" });
+  }
 
   const vendor = await getVendor(vendorId);
 
-  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+  if (!vendor) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   const plan = vendor.subscriptionPlan || "Free";
 
@@ -199,13 +263,19 @@ app.get("/vendor/:vendorId/subscription", async (req, res) => {
 app.get("/vendor/:vendorId/services", async (req, res) => {
   const { vendorId } = req.params;
 
-  if (!validId(vendorId))
+  if (!validId(vendorId)) {
     return res.status(400).send({ message: "Invalid vendor ID" });
+  }
 
-  if (!(await getVendor(vendorId)))
-    return res.status(404).send({ message: "Vendor not found" });
+  if (!(await getVendor(vendorId))) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
-  res.send(await services.find({ vendorId }).sort({ createdAt: -1 }).toArray());
+  res.send(
+    await services.find({ vendorId }).sort({ createdAt: -1 }).toArray(),
+  );
 });
 
 // add service api
@@ -239,7 +309,11 @@ app.post("/services", async (req, res) => {
 
   const vendor = await getVendor(vendorId);
 
-  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+  if (!vendor) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   if (
     (vendor.subscriptionPlan || "Free") !== "Premium" &&
@@ -299,6 +373,12 @@ app.patch("/services/:id", async (req, res) => {
     return res.status(400).send({ message: "Invalid service details or ID" });
   }
 
+  if (!(await getVendor(vendorId))) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
+
   const result = await services.updateOne(
     { _id: new ObjectId(id), vendorId },
     {
@@ -313,8 +393,9 @@ app.patch("/services/:id", async (req, res) => {
     },
   );
 
-  if (!result.matchedCount)
+  if (!result.matchedCount) {
     return res.status(404).send({ message: "Service not found" });
+  }
 
   res.send({ message: "Service updated successfully" });
 });
@@ -331,18 +412,26 @@ app.patch("/services/:id/availability", async (req, res) => {
       .send({ message: "Invalid service ID or availability" });
   }
 
+  const vendor = await getVendor(vendorId);
+
+  if (!vendor) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
+
   const service = await services.findOne({
     _id: new ObjectId(id),
     vendorId,
   });
 
-  if (!service) return res.status(404).send({ message: "Service not found" });
+  if (!service) {
+    return res.status(404).send({ message: "Service not found" });
+  }
 
   if (isActive && service.status === "Approved") {
-    const vendor = await getVendor(vendorId);
-
     if (
-      (vendor?.subscriptionPlan || "Free") !== "Premium" &&
+      (vendor.subscriptionPlan || "Free") !== "Premium" &&
       (await countActiveServices(vendorId, id)) >= 3
     ) {
       return res.status(403).send({
@@ -365,16 +454,24 @@ app.delete("/services/:id", async (req, res) => {
   const { id } = req.params;
   const { vendorId } = req.body;
 
-  if (!validId(id) || !validId(vendorId))
+  if (!validId(id) || !validId(vendorId)) {
     return res.status(400).send({ message: "Invalid service or vendor ID" });
+  }
+
+  if (!(await getVendor(vendorId))) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   const result = await services.deleteOne({
     _id: new ObjectId(id),
     vendorId,
   });
 
-  if (!result.deletedCount)
+  if (!result.deletedCount) {
     return res.status(404).send({ message: "Service not found" });
+  }
 
   res.send({ message: "Service deleted successfully" });
 });
@@ -384,12 +481,17 @@ app.delete("/services/:id", async (req, res) => {
 app.get("/vendor/:vendorId/dashboard", async (req, res) => {
   const { vendorId } = req.params;
 
-  if (!validId(vendorId))
+  if (!validId(vendorId)) {
     return res.status(400).send({ message: "Invalid vendor ID" });
+  }
 
   const vendor = await getVendor(vendorId);
 
-  if (!vendor) return res.status(404).send({ message: "Vendor not found" });
+  if (!vendor) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   const [totalServices, activeServices, pendingRequests, acceptedBookings] =
     await Promise.all([
@@ -413,11 +515,15 @@ app.get("/vendor/:vendorId/dashboard", async (req, res) => {
 app.get("/vendor/:vendorId/bookings", async (req, res) => {
   const { vendorId } = req.params;
 
-  if (!validId(vendorId))
+  if (!validId(vendorId)) {
     return res.status(400).send({ message: "Invalid vendor ID" });
+  }
 
-  if (!(await getVendor(vendorId)))
-    return res.status(404).send({ message: "Vendor not found" });
+  if (!(await getVendor(vendorId))) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   const result = await bookings
     .find({ vendorId })
@@ -458,18 +564,22 @@ app.patch("/vendor/:vendorId/bookings/:bookingId/status", async (req, res) => {
     return res.status(400).send({ message: "Invalid ID or booking status" });
   }
 
-  if (!(await getVendor(vendorId)))
-    return res.status(404).send({ message: "Vendor not found" });
+  if (!(await getVendor(vendorId))) {
+    return res.status(403).send({
+      message: "Vendor account is blocked or unavailable",
+    });
+  }
 
   const result = await bookings.updateOne(
     { _id: new ObjectId(bookingId), vendorId, status: "Pending" },
     { $set: { status } },
   );
 
-  if (!result.matchedCount)
+  if (!result.matchedCount) {
     return res
       .status(404)
       .send({ message: "Booking not found or no longer Pending" });
+  }
 
   res.send({ message: `Booking ${status.toLowerCase()} successfully` });
 });
@@ -481,11 +591,13 @@ app.patch("/vendor/:vendorId/bookings/:bookingId/status", async (req, res) => {
 app.get("/admin/:adminId/dashboard", async (req, res) => {
   const { adminId } = req.params;
 
-  if (!validId(adminId))
+  if (!validId(adminId)) {
     return res.status(400).send({ message: "Invalid admin ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
   const [
     totalUsers,
@@ -519,14 +631,17 @@ app.get("/admin/:adminId/users", async (req, res) => {
   const { adminId } = req.params;
   const { search = "", role = "" } = req.query;
 
-  if (!validId(adminId))
+  if (!validId(adminId)) {
     return res.status(400).send({ message: "Invalid admin ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
-  if (role && !["admin", "vendor", "customer"].includes(role))
+  if (role && !["admin", "vendor", "customer"].includes(role)) {
     return res.status(400).send({ message: "Invalid user role" });
+  }
 
   const query = {};
 
@@ -561,11 +676,13 @@ app.get("/admin/:adminId/users", async (req, res) => {
 app.get("/admin/:adminId/users/:userId", async (req, res) => {
   const { adminId, userId } = req.params;
 
-  if (!validId(adminId) || !validId(userId))
+  if (!validId(adminId) || !validId(userId)) {
     return res.status(400).send({ message: "Invalid admin or user ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
   const user = await users.findOne(
     { _id: new ObjectId(userId) },
@@ -585,7 +702,9 @@ app.get("/admin/:adminId/users/:userId", async (req, res) => {
     },
   );
 
-  if (!user) return res.status(404).send({ message: "User not found" });
+  if (!user) {
+    return res.status(404).send({ message: "User not found" });
+  }
 
   res.send(user);
 });
@@ -596,17 +715,23 @@ app.patch("/admin/:adminId/users/:userId/status", async (req, res) => {
   const { adminId, userId } = req.params;
   const { isBlocked } = req.body;
 
-  if (!validId(adminId) || !validId(userId) || typeof isBlocked !== "boolean") {
+  if (
+    !validId(adminId) ||
+    !validId(userId) ||
+    typeof isBlocked !== "boolean"
+  ) {
     return res.status(400).send({ message: "Invalid ID or block status" });
   }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
-  if (adminId === userId && isBlocked)
+  if (adminId === userId && isBlocked) {
     return res
       .status(400)
       .send({ message: "You cannot block your own admin account" });
+  }
 
   const result = await users.updateOne(
     {
@@ -616,8 +741,9 @@ app.patch("/admin/:adminId/users/:userId/status", async (req, res) => {
     { $set: { isBlocked, updatedAt: new Date() } },
   );
 
-  if (!result.matchedCount)
+  if (!result.matchedCount) {
     return res.status(404).send({ message: "User not found" });
+  }
 
   res.send({
     message: isBlocked
@@ -632,17 +758,21 @@ app.get("/admin/:adminId/services", async (req, res) => {
   const { adminId } = req.params;
   const { search = "", status = "", isActive = "" } = req.query;
 
-  if (!validId(adminId))
+  if (!validId(adminId)) {
     return res.status(400).send({ message: "Invalid admin ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
-  if (status && !["Pending", "Approved", "Rejected"].includes(status))
+  if (status && !["Pending", "Approved", "Rejected"].includes(status)) {
     return res.status(400).send({ message: "Invalid service status" });
+  }
 
-  if (isActive && !["true", "false"].includes(isActive))
+  if (isActive && !["true", "false"].includes(isActive)) {
     return res.status(400).send({ message: "Invalid availability filter" });
+  }
 
   const query = {};
 
@@ -660,7 +790,10 @@ app.get("/admin/:adminId/services", async (req, res) => {
     ];
   }
 
-  const result = await services.find(query).sort({ createdAt: -1 }).toArray();
+  const result = await services
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
 
   const details = await Promise.all(
     result.map(async (service) => {
@@ -674,6 +807,7 @@ app.get("/admin/:adminId/services", async (req, res) => {
                 image: 1,
                 businessName: 1,
                 subscriptionPlan: 1,
+                isBlocked: 1,
               },
             },
           )
@@ -692,11 +826,13 @@ app.patch("/admin/:adminId/services/:serviceId/status", async (req, res) => {
   const { adminId, serviceId } = req.params;
   const { status, isActive } = req.body;
 
-  if (!validId(adminId) || !validId(serviceId))
+  if (!validId(adminId) || !validId(serviceId)) {
     return res.status(400).send({ message: "Invalid admin or service ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
   if (
     status !== undefined &&
@@ -705,28 +841,33 @@ app.patch("/admin/:adminId/services/:serviceId/status", async (req, res) => {
     return res.status(400).send({ message: "Invalid service status" });
   }
 
-  if (isActive !== undefined && typeof isActive !== "boolean")
+  if (isActive !== undefined && typeof isActive !== "boolean") {
     return res.status(400).send({ message: "Invalid availability status" });
+  }
 
-  if (status === undefined && isActive === undefined)
+  if (status === undefined && isActive === undefined) {
     return res.status(400).send({ message: "Provide status or isActive" });
+  }
 
   const service = await services.findOne({
     _id: new ObjectId(serviceId),
   });
 
-  if (!service) return res.status(404).send({ message: "Service not found" });
+  if (!service) {
+    return res.status(404).send({ message: "Service not found" });
+  }
 
   if (
     isActive !== undefined &&
     service.status !== "Approved" &&
     status === undefined
-  )
+  ) {
     return res.status(400).send({
       message: "Only approved services can change availability",
     });
+  }
 
-  let updatedStatus = status ?? service.status;
+  const updatedStatus = status ?? service.status;
 
   let updatedActive =
     isActive !== undefined
@@ -738,13 +879,17 @@ app.patch("/admin/:adminId/services/:serviceId/status", async (req, res) => {
   if (updatedStatus !== "Approved") updatedActive = false;
 
   if (updatedStatus === "Approved" && updatedActive) {
-    if (!validId(service.vendorId))
+    if (!validId(service.vendorId)) {
       return res.status(400).send({ message: "Invalid service vendor ID" });
+    }
 
     const vendor = await getVendor(service.vendorId);
 
-    if (!vendor)
-      return res.status(404).send({ message: "Service vendor not found" });
+    if (!vendor) {
+      return res.status(403).send({
+        message: "Service vendor is blocked or unavailable",
+      });
+    }
 
     if (
       (vendor.subscriptionPlan || "Free") !== "Premium" &&
@@ -780,18 +925,21 @@ app.patch("/admin/:adminId/services/:serviceId/status", async (req, res) => {
 app.delete("/admin/:adminId/services/:serviceId", async (req, res) => {
   const { adminId, serviceId } = req.params;
 
-  if (!validId(adminId) || !validId(serviceId))
+  if (!validId(adminId) || !validId(serviceId)) {
     return res.status(400).send({ message: "Invalid admin or service ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
   const result = await services.deleteOne({
     _id: new ObjectId(serviceId),
   });
 
-  if (!result.deletedCount)
+  if (!result.deletedCount) {
     return res.status(404).send({ message: "Service not found" });
+  }
 
   res.send({ message: "Service deleted successfully" });
 });
@@ -801,13 +949,18 @@ app.delete("/admin/:adminId/services/:serviceId", async (req, res) => {
 app.get("/admin/:adminId/transactions", async (req, res) => {
   const { adminId } = req.params;
 
-  if (!validId(adminId))
+  if (!validId(adminId)) {
     return res.status(400).send({ message: "Invalid admin ID" });
+  }
 
-  if (!(await getAdmin(adminId)))
+  if (!(await getAdmin(adminId))) {
     return res.status(403).send({ message: "Admin access required" });
+  }
 
-  const result = await transactions.find({}).sort({ createdAt: -1 }).toArray();
+  const result = await transactions
+    .find({})
+    .sort({ createdAt: -1 })
+    .toArray();
 
   const details = await Promise.all(
     result.map(async (transaction) => {

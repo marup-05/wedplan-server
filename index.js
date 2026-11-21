@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -11,21 +10,27 @@ app.use(express.json());
 app.use(cors());
 
 const client = new MongoClient(
-  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`
+  `mongodb://${process.env.DB_USER}:${process.env.DB_PASSWORD}@ac-44gdk0u-shard-00-00.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-01.l06uzuf.mongodb.net:27017,ac-44gdk0u-shard-00-02.l06uzuf.mongodb.net:27017/?ssl=true&replicaSet=atlas-iuroc7-shard-0&authSource=admin`,
 );
 
 await client.connect();
+
 console.log("Connected to MongoDB!");
 
 const database = client.db("wedPlan");
+
 const users = database.collection("user");
 const services = database.collection("services");
 const bookings = database.collection("bookings");
 const transactions = database.collection("transactions");
 
 // reusable helpers
+
 const getVendor = (id) =>
   users.findOne({ _id: new ObjectId(id), role: "vendor" });
+
+const getAdmin = (id) =>
+  users.findOne({ _id: new ObjectId(id), role: "admin" });
 
 const countActiveServices = (vendorId, excludeId) =>
   services.countDocuments({
@@ -37,20 +42,139 @@ const countActiveServices = (vendorId, excludeId) =>
 
 const validId = (id) => ObjectId.isValid(id);
 
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // root api
+
 app.get("/", (req, res) => res.send("WedPlan is planning!"));
 
-// users api (testing only)
-app.get("/users", async (req, res) => {
-  res.send(await users.find({}).toArray());
+// ==================== PUBLIC SERVICES APIs ====================
+
+// all approved and active services
+
+app.get("/services", async (req, res) => {
+  res.send(
+    await services.find({ status: "Approved", isActive: true }).toArray(),
+  );
 });
 
-// public services api
-app.get("/services", async (req, res) => {
-  res.send(await services.find({ status: "Approved", isActive: true }).toArray());
+// single service details api
+
+app.get("/services/:id", async (req, res) => {
+  const { id } = req.params;
+
+  if (!validId(id)) {
+    return res.status(400).send({ message: "Invalid service ID" });
+  }
+
+  const service = await services.findOne({
+    _id: new ObjectId(id),
+    status: "Approved",
+    isActive: true,
+  });
+
+  if (!service) {
+    return res.status(404).send({ message: "Service not found" });
+  }
+
+  res.send(service);
 });
+
+// ==================== BOOKING APIs ====================
+
+// customer creates booking request
+
+app.post("/bookings", async (req, res) => {
+  const { serviceId, vendorId, customerId, eventDate, eventLocation, message } =
+    req.body;
+
+  if (
+    !validId(serviceId) ||
+    !validId(vendorId) ||
+    !validId(customerId) ||
+    !eventDate ||
+    !eventLocation?.trim()
+  ) {
+    return res.status(400).send({
+      message: "Please provide valid booking information",
+    });
+  }
+
+  if (Number.isNaN(Date.parse(eventDate))) {
+    return res.status(400).send({ message: "Invalid event date" });
+  }
+
+  if (new Date(eventDate) < new Date(new Date().toDateString())) {
+    return res.status(400).send({
+      message: "Event date cannot be in the past",
+    });
+  }
+
+  const customer = await users.findOne({
+    _id: new ObjectId(customerId),
+    role: "customer",
+  });
+
+  if (!customer) {
+    return res.status(404).send({ message: "Customer not found" });
+  }
+
+  const service = await services.findOne({
+    _id: new ObjectId(serviceId),
+    status: "Approved",
+    isActive: true,
+  });
+
+  if (!service) {
+    return res.status(404).send({ message: "Service not available" });
+  }
+
+  if (service.vendorId !== vendorId) {
+    return res.status(400).send({ message: "Invalid vendor ID" });
+  }
+
+  if (customerId === vendorId) {
+    return res.status(400).send({
+      message: "You cannot book your own service",
+    });
+  }
+
+  const existingBooking = await bookings.findOne({
+    serviceId,
+    customerId,
+    eventDate,
+    status: { $in: ["Pending", "Accepted"] },
+  });
+
+  if (existingBooking) {
+    return res.status(409).send({
+      message: "You already have an active booking for this service and date",
+    });
+  }
+
+  const booking = {
+    serviceId,
+    vendorId,
+    customerId,
+    eventDate,
+    eventLocation: eventLocation.trim(),
+    message: message?.trim() || "",
+    status: "Pending",
+    createdAt: new Date(),
+  };
+
+  const result = await bookings.insertOne(booking);
+
+  res.status(201).send({
+    message: "Booking request created successfully",
+    bookingId: result.insertedId,
+  });
+});
+
+// ==================== VENDOR APIs ====================
 
 // vendor subscription api
+
 app.get("/vendor/:vendorId/subscription", async (req, res) => {
   const { vendorId } = req.params;
 
@@ -58,6 +182,7 @@ app.get("/vendor/:vendorId/subscription", async (req, res) => {
     return res.status(400).send({ message: "Invalid vendor ID" });
 
   const vendor = await getVendor(vendorId);
+
   if (!vendor) return res.status(404).send({ message: "Vendor not found" });
 
   const plan = vendor.subscriptionPlan || "Free";
@@ -70,6 +195,7 @@ app.get("/vendor/:vendorId/subscription", async (req, res) => {
 });
 
 // vendor own services api
+
 app.get("/vendor/:vendorId/services", async (req, res) => {
   const { vendorId } = req.params;
 
@@ -83,24 +209,41 @@ app.get("/vendor/:vendorId/services", async (req, res) => {
 });
 
 // add service api
+
 app.post("/services", async (req, res) => {
-  const { vendorId, serviceName, category, description, price, location, images } = req.body;
+  const {
+    vendorId,
+    serviceName,
+    category,
+    description,
+    price,
+    location,
+    images,
+  } = req.body;
 
   if (
-    !validId(vendorId) || !serviceName?.trim() || !category ||
-    !description?.trim() || !location?.trim() ||
-    !Array.isArray(images) || !images.length ||
-    !Number.isFinite(Number(price)) || Number(price) <= 0
+    !validId(vendorId) ||
+    !serviceName?.trim() ||
+    !category ||
+    !description?.trim() ||
+    !location?.trim() ||
+    !Array.isArray(images) ||
+    !images.length ||
+    !Number.isFinite(Number(price)) ||
+    Number(price) <= 0
   ) {
-    return res.status(400).send({ message: "Please provide valid service details and images" });
+    return res
+      .status(400)
+      .send({ message: "Please provide valid service details and images" });
   }
 
   const vendor = await getVendor(vendorId);
+
   if (!vendor) return res.status(404).send({ message: "Vendor not found" });
 
   if (
     (vendor.subscriptionPlan || "Free") !== "Premium" &&
-    await countActiveServices(vendorId) >= 3
+    (await countActiveServices(vendorId)) >= 3
   ) {
     return res.status(403).send({
       message: "Free plan allows only 3 active services. Upgrade to Premium.",
@@ -108,9 +251,16 @@ app.post("/services", async (req, res) => {
   }
 
   const result = await services.insertOne({
-    vendorId, serviceName, category, description,
-    price: Number(price), location, images,
-    status: "Pending", isActive: true, createdAt: new Date(),
+    vendorId,
+    serviceName,
+    category,
+    description,
+    price: Number(price),
+    location,
+    images,
+    status: "Pending",
+    isActive: true,
+    createdAt: new Date(),
   });
 
   res.send({
@@ -120,22 +270,47 @@ app.post("/services", async (req, res) => {
 });
 
 // update service api
+
 app.patch("/services/:id", async (req, res) => {
   const { id } = req.params;
-  const { vendorId, serviceName, category, description, price, location, images } = req.body;
+
+  const {
+    vendorId,
+    serviceName,
+    category,
+    description,
+    price,
+    location,
+    images,
+  } = req.body;
 
   if (
-    !validId(id) || !validId(vendorId) ||
-    !serviceName?.trim() || !category || !description?.trim() ||
-    !location?.trim() || !Array.isArray(images) || !images.length ||
-    !Number.isFinite(Number(price)) || Number(price) <= 0
+    !validId(id) ||
+    !validId(vendorId) ||
+    !serviceName?.trim() ||
+    !category ||
+    !description?.trim() ||
+    !location?.trim() ||
+    !Array.isArray(images) ||
+    !images.length ||
+    !Number.isFinite(Number(price)) ||
+    Number(price) <= 0
   ) {
     return res.status(400).send({ message: "Invalid service details or ID" });
   }
 
   const result = await services.updateOne(
     { _id: new ObjectId(id), vendorId },
-    { $set: { serviceName, category, description, price: Number(price), location, images } }
+    {
+      $set: {
+        serviceName,
+        category,
+        description,
+        price: Number(price),
+        location,
+        images,
+      },
+    },
   );
 
   if (!result.matchedCount)
@@ -145,14 +320,22 @@ app.patch("/services/:id", async (req, res) => {
 });
 
 // service availability api
+
 app.patch("/services/:id/availability", async (req, res) => {
   const { id } = req.params;
   const { vendorId, isActive } = req.body;
 
-  if (!validId(id) || !validId(vendorId) || typeof isActive !== "boolean")
-    return res.status(400).send({ message: "Invalid service ID or availability" });
+  if (!validId(id) || !validId(vendorId) || typeof isActive !== "boolean") {
+    return res
+      .status(400)
+      .send({ message: "Invalid service ID or availability" });
+  }
 
-  const service = await services.findOne({ _id: new ObjectId(id), vendorId });
+  const service = await services.findOne({
+    _id: new ObjectId(id),
+    vendorId,
+  });
+
   if (!service) return res.status(404).send({ message: "Service not found" });
 
   if (isActive && service.status === "Approved") {
@@ -160,7 +343,7 @@ app.patch("/services/:id/availability", async (req, res) => {
 
     if (
       (vendor?.subscriptionPlan || "Free") !== "Premium" &&
-      await countActiveServices(vendorId, id) >= 3
+      (await countActiveServices(vendorId, id)) >= 3
     ) {
       return res.status(403).send({
         message: "Free plan allows only 3 active services. Upgrade to Premium.",
@@ -170,13 +353,14 @@ app.patch("/services/:id/availability", async (req, res) => {
 
   await services.updateOne(
     { _id: new ObjectId(id), vendorId },
-    { $set: { isActive } }
+    { $set: { isActive } },
   );
 
   res.send({ message: "Availability updated successfully" });
 });
 
 // delete service api
+
 app.delete("/services/:id", async (req, res) => {
   const { id } = req.params;
   const { vendorId } = req.body;
@@ -185,7 +369,8 @@ app.delete("/services/:id", async (req, res) => {
     return res.status(400).send({ message: "Invalid service or vendor ID" });
 
   const result = await services.deleteOne({
-    _id: new ObjectId(id), vendorId,
+    _id: new ObjectId(id),
+    vendorId,
   });
 
   if (!result.deletedCount)
@@ -195,6 +380,7 @@ app.delete("/services/:id", async (req, res) => {
 });
 
 // vendor dashboard api
+
 app.get("/vendor/:vendorId/dashboard", async (req, res) => {
   const { vendorId } = req.params;
 
@@ -202,6 +388,7 @@ app.get("/vendor/:vendorId/dashboard", async (req, res) => {
     return res.status(400).send({ message: "Invalid vendor ID" });
 
   const vendor = await getVendor(vendorId);
+
   if (!vendor) return res.status(404).send({ message: "Vendor not found" });
 
   const [totalServices, activeServices, pendingRequests, acceptedBookings] =
@@ -213,12 +400,16 @@ app.get("/vendor/:vendorId/dashboard", async (req, res) => {
     ]);
 
   res.send({
-    totalServices, activeServices, pendingRequests, acceptedBookings,
+    totalServices,
+    activeServices,
+    pendingRequests,
+    acceptedBookings,
     subscriptionPlan: vendor.subscriptionPlan || "Free",
   });
 });
 
 // vendor booking requests api
+
 app.get("/vendor/:vendorId/bookings", async (req, res) => {
   const { vendorId } = req.params;
 
@@ -228,33 +419,42 @@ app.get("/vendor/:vendorId/bookings", async (req, res) => {
   if (!(await getVendor(vendorId)))
     return res.status(404).send({ message: "Vendor not found" });
 
-  const result = await bookings.find({ vendorId }).sort({ createdAt: -1 }).toArray();
+  const result = await bookings
+    .find({ vendorId })
+    .sort({ createdAt: -1 })
+    .toArray();
 
-  const details = await Promise.all(result.map(async (booking) => {
-    const service = validId(booking.serviceId)
-      ? await services.findOne({ _id: new ObjectId(booking.serviceId) })
-      : null;
+  const details = await Promise.all(
+    result.map(async (booking) => {
+      const service = validId(booking.serviceId)
+        ? await services.findOne({ _id: new ObjectId(booking.serviceId) })
+        : null;
 
-    const customer = validId(booking.customerId)
-      ? await users.findOne(
-          { _id: new ObjectId(booking.customerId) },
-          { projection: { name: 1, email: 1, image: 1 } }
-        )
-      : null;
+      const customer = validId(booking.customerId)
+        ? await users.findOne(
+            { _id: new ObjectId(booking.customerId) },
+            { projection: { name: 1, email: 1, image: 1 } },
+          )
+        : null;
 
-    return { ...booking, service, customer };
-  }));
+      return { ...booking, service, customer };
+    }),
+  );
 
   res.send(details);
 });
 
 // vendor accept or reject booking api
+
 app.patch("/vendor/:vendorId/bookings/:bookingId/status", async (req, res) => {
   const { vendorId, bookingId } = req.params;
   const { status } = req.body;
 
-  if (!validId(vendorId) || !validId(bookingId) ||
-      !["Accepted", "Rejected"].includes(status)) {
+  if (
+    !validId(vendorId) ||
+    !validId(bookingId) ||
+    !["Accepted", "Rejected"].includes(status)
+  ) {
     return res.status(400).send({ message: "Invalid ID or booking status" });
   }
 
@@ -263,14 +463,232 @@ app.patch("/vendor/:vendorId/bookings/:bookingId/status", async (req, res) => {
 
   const result = await bookings.updateOne(
     { _id: new ObjectId(bookingId), vendorId, status: "Pending" },
-    { $set: { status } }
+    { $set: { status } },
   );
 
   if (!result.matchedCount)
-    return res.status(404).send({ message: "Booking not found or no longer Pending" });
+    return res
+      .status(404)
+      .send({ message: "Booking not found or no longer Pending" });
 
   res.send({ message: `Booking ${status.toLowerCase()} successfully` });
 });
+
+// ==================== ADMIN APIs ====================
+
+// admin dashboard overview api
+
+app.get("/admin/:adminId/dashboard", async (req, res) => {
+  const { adminId } = req.params;
+
+  if (!validId(adminId))
+    return res.status(400).send({ message: "Invalid admin ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  const [
+    totalUsers,
+    totalVendors,
+    totalCustomers,
+    totalServices,
+    pendingServices,
+    totalTransactions,
+  ] = await Promise.all([
+    users.countDocuments({}),
+    users.countDocuments({ role: "vendor" }),
+    users.countDocuments({ role: "customer" }),
+    services.countDocuments({}),
+    services.countDocuments({ status: "Pending" }),
+    transactions.countDocuments({}),
+  ]);
+
+  res.send({
+    totalUsers,
+    totalVendors,
+    totalCustomers,
+    totalServices,
+    pendingServices,
+    totalTransactions,
+  });
+});
+
+// admin users list, search and role filter api
+
+app.get("/admin/:adminId/users", async (req, res) => {
+  const { adminId } = req.params;
+  const { search = "", role = "" } = req.query;
+
+  if (!validId(adminId))
+    return res.status(400).send({ message: "Invalid admin ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  if (role && !["admin", "vendor", "customer"].includes(role))
+    return res.status(400).send({ message: "Invalid user role" });
+
+  const query = {};
+
+  if (role) query.role = role;
+
+  if (search.trim()) {
+    const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
+    query.$or = [{ name: searchRegex }, { email: searchRegex }];
+  }
+
+  const result = await users
+    .find(query, {
+      projection: {
+        name: 1,
+        email: 1,
+        image: 1,
+        role: 1,
+        isBlocked: 1,
+        emailVerified: 1,
+        createdAt: 1,
+        businessName: 1,
+      },
+    })
+    .sort({ createdAt: -1 })
+    .toArray();
+
+  res.send(result);
+});
+
+// admin single user details api
+
+app.get("/admin/:adminId/users/:userId", async (req, res) => {
+  const { adminId, userId } = req.params;
+
+  if (!validId(adminId) || !validId(userId))
+    return res.status(400).send({ message: "Invalid admin or user ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  const user = await users.findOne(
+    { _id: new ObjectId(userId) },
+    {
+      projection: {
+        name: 1,
+        email: 1,
+        image: 1,
+        role: 1,
+        isBlocked: 1,
+        emailVerified: 1,
+        createdAt: 1,
+        businessName: 1,
+        subscriptionPlan: 1,
+        subscriptionExpiresAt: 1,
+      },
+    },
+  );
+
+  if (!user) return res.status(404).send({ message: "User not found" });
+
+  res.send(user);
+});
+
+// admin block or unblock user api
+
+app.patch("/admin/:adminId/users/:userId/status", async (req, res) => {
+  const { adminId, userId } = req.params;
+  const { isBlocked } = req.body;
+
+  if (!validId(adminId) || !validId(userId) || typeof isBlocked !== "boolean") {
+    return res.status(400).send({ message: "Invalid ID or block status" });
+  }
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  if (adminId === userId && isBlocked)
+    return res
+      .status(400)
+      .send({ message: "You cannot block your own admin account" });
+
+  const result = await users.updateOne(
+    {
+      _id: new ObjectId(userId),
+      role: { $in: ["admin", "vendor", "customer"] },
+    },
+    { $set: { isBlocked, updatedAt: new Date() } },
+  );
+
+  if (!result.matchedCount)
+    return res.status(404).send({ message: "User not found" });
+
+  res.send({
+    message: isBlocked
+      ? "User blocked successfully"
+      : "User unblocked successfully",
+  });
+});
+
+// admin all services, search and filter api
+
+app.get("/admin/:adminId/services", async (req, res) => {
+  const { adminId } = req.params;
+  const { search = "", status = "", isActive = "" } = req.query;
+
+  if (!validId(adminId))
+    return res.status(400).send({ message: "Invalid admin ID" });
+
+  if (!(await getAdmin(adminId)))
+    return res.status(403).send({ message: "Admin access required" });
+
+  if (status && !["Pending", "Approved", "Rejected"].includes(status))
+    return res.status(400).send({ message: "Invalid service status" });
+
+  if (isActive && !["true", "false"].includes(isActive))
+    return res.status(400).send({ message: "Invalid availability filter" });
+
+  const query = {};
+
+  if (status) query.status = status;
+  if (isActive) query.isActive = isActive === "true";
+
+  if (search.trim()) {
+    const searchRegex = new RegExp(escapeRegex(search.trim()), "i");
+
+    query.$or = [
+      { serviceName: searchRegex },
+      { category: searchRegex },
+      { location: searchRegex },
+      { description: searchRegex },
+    ];
+  }
+
+  const result = await services.find(query).sort({ createdAt: -1 }).toArray();
+
+  const details = await Promise.all(
+    result.map(async (service) => {
+      const vendor = validId(service.vendorId)
+        ? await users.findOne(
+            { _id: new ObjectId(service.vendorId) },
+            {
+              projection: {
+                name: 1,
+                email: 1,
+                image: 1,
+                businessName: 1,
+                subscriptionPlan: 1,
+              },
+            },
+          )
+        : null;
+
+      return { ...service, vendor };
+    }),
+  );
+
+  res.send(details);
+});
+
+
+
+// server
 
 app.listen(PORT, () => console.log(`WedPlan is running on port ${PORT}`));
 

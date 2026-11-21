@@ -263,7 +263,70 @@ app.get("/customer/:customerId/bookings", async (req, res) => {
   res.send(details);
 });
 
+// Customer single booking details
+app.get("/customer/:customerId/bookings/:bookingId", async (req, res) => {
+  const { customerId, bookingId } = req.params;
 
+  if (!validId(customerId) || !validId(bookingId))
+    return res.status(400).send({ message: "Invalid customer or booking ID" });
+
+  if (!(await getCustomer(customerId)))
+    return res.status(403).send({
+      message: "Customer account is blocked or unavailable",
+    });
+
+  const booking = await bookings.findOne({
+    _id: objectId(bookingId),
+    customerId,
+  });
+
+  if (!booking) return res.status(404).send({ message: "Booking not found" });
+
+  res.send(await getBookingDetails(booking));
+});
+
+// Customer cancel pending booking
+app.patch(
+  "/customer/:customerId/bookings/:bookingId/cancel",
+  async (req, res) => {
+    const { customerId, bookingId } = req.params;
+
+    if (!validId(customerId) || !validId(bookingId))
+      return res.status(400).send({
+        message: "Invalid customer or booking ID",
+      });
+
+    if (!(await getCustomer(customerId)))
+      return res.status(403).send({
+        message: "Customer account is blocked or unavailable",
+      });
+
+    const result = await bookings.updateOne(
+      {
+        _id: objectId(bookingId),
+        customerId,
+        status: "Pending",
+      },
+      { $set: { status: "Cancelled", updatedAt: new Date() } },
+    );
+
+    if (!result.matchedCount) {
+      const booking = await bookings.findOne({
+        _id: objectId(bookingId),
+        customerId,
+      });
+
+      if (!booking)
+        return res.status(404).send({ message: "Booking not found" });
+
+      return res.status(400).send({
+        message: `You cannot cancel a ${booking.status.toLowerCase()} booking`,
+      });
+    }
+
+    res.send({ message: "Booking cancelled successfully" });
+  },
+);
 
 // ==================== VENDOR APIs ====================
 

@@ -1,10 +1,14 @@
+
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
+import Stripe from "stripe";
 import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(express.json());
 app.use(cors());
@@ -75,6 +79,60 @@ const getBookingDetails = async (booking) => {
 
 // Root
 app.get("/", (req, res) => res.send("WedPlan is planning!"));
+
+// ==================== STRIPE PAYMENT VERIFY ====================
+
+app.post("/payments/checkout-verify", async (req, res) => {
+  const { sessionId } = req.body;
+
+  if (!sessionId)
+    return res.status(400).send({ message: "Session ID required" });
+
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+  if (
+    session.status !== "complete" ||
+    session.payment_status !== "paid" ||
+    session.mode !== "payment"
+  ) {
+    return res.status(400).send({ message: "Payment not completed" });
+  }
+
+  const vendorId = session.metadata?.vendorId;
+
+  if (!validId(vendorId))
+    return res.status(400).send({ message: "Invalid vendor ID" });
+
+  const vendor = await getVendor(vendorId);
+
+  if (!vendor)
+    return res.status(404).send({ message: "Vendor not found" });
+
+  const existing = await transactions.findOne({
+    stripeSessionId: sessionId,
+  });
+
+  if (existing)
+    return res.send({ message: "Payment already verified" });
+
+  await users.updateOne(
+    { _id: objectId(vendorId) },
+    { $set: { subscriptionPlan: "Premium" } },
+  );
+
+  await transactions.insertOne({
+    vendorId,
+    stripeSessionId: sessionId,
+    paymentIntentId: session.payment_intent,
+    amount: session.amount_total / 100,
+    currency: session.currency,
+    status: "Paid",
+    plan: "Premium",
+    createdAt: new Date(),
+  });
+
+  res.send({ message: "Premium activated successfully" });
+});
 
 // ==================== PUBLIC SERVICES ====================
 

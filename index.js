@@ -1,4 +1,3 @@
-
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
@@ -49,10 +48,10 @@ const getVendor = (id) => getUser(id, "vendor");
 const getAdmin = (id) => getUser(id, "admin");
 const getCustomer = (id) => getUser(id, "customer");
 
+
 const countActiveServices = (vendorId, excludeId) =>
   services.countDocuments({
     vendorId,
-    status: "Approved",
     isActive: true,
     ...(excludeId && { _id: { $ne: objectId(excludeId) } }),
   });
@@ -250,6 +249,8 @@ app.get("/services/:id", async (req, res) => {
 
 // ==================== BOOKING CREATE ====================
 
+// ==================== CREATE BOOKING ====================
+
 app.post("/bookings", verifyToken, verifyCustomer, async (req, res) => {
   const { serviceId, eventDate, eventLocation, message } = req.body;
   const customerId = req.user._id.toString();
@@ -443,7 +444,6 @@ app.get(
   },
 );
 
-
 // Vendor own services
 app.get(
   "/vendor/services",
@@ -584,7 +584,6 @@ app.patch(
 
     if (
       isActive &&
-      service.status === "Approved" &&
       (req.user.subscriptionPlan || "Free") !== "Premium" &&
       (await countActiveServices(vendorId, id)) >= 3
     )
@@ -600,8 +599,7 @@ app.patch(
     res.send({ message: "Availability updated successfully" });
   },
 );
-
-// Delete service
+/// Delete service
 app.delete("/services/:id", verifyToken, verifyVendor, async (req, res) => {
   const { id } = req.params;
   const vendorId = req.user._id.toString();
@@ -948,6 +946,7 @@ app.patch(
       });
 
     const updatedStatus = status ?? service.status;
+
     let updatedActive =
       isActive !== undefined
         ? isActive

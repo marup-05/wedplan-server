@@ -201,6 +201,8 @@ app.post(
 
 // ==================== PUBLIC SERVICES ====================
 
+// ==================== PUBLIC SERVICES ====================
+
 app.get("/services", async (req, res) => {
   const allServices = await services
     .find({ status: "Approved", isActive: true })
@@ -210,19 +212,41 @@ app.get("/services", async (req, res) => {
     ...new Set(allServices.map((s) => s.vendorId).filter(validId)),
   ];
 
-  const blockedVendors = await users
+  const vendorUsers = await users
     .find(
       {
         _id: { $in: vendorIds.map(objectId) },
-        isBlocked: true,
+        role: "vendor",
+        isBlocked: { $ne: true },
       },
-      { projection: { _id: 1 } },
+      {
+        projection: {
+          _id: 1,
+          name: 1,
+          image: 1,
+        },
+      },
     )
     .toArray();
 
-  const blockedIds = new Set(blockedVendors.map((v) => v._id.toString()));
+  const vendorMap = new Map(
+    vendorUsers.map((vendor) => [
+      vendor._id.toString(),
+      {
+        name: vendor.name || "Wedding Vendor",
+        image: vendor.image || "",
+      },
+    ]),
+  );
 
-  res.send(allServices.filter((s) => !blockedIds.has(s.vendorId)));
+  const servicesWithVendor = allServices
+    .filter((service) => vendorMap.has(service.vendorId))
+    .map((service) => ({
+      ...service,
+      vendor: vendorMap.get(service.vendorId),
+    }));
+
+  res.send(servicesWithVendor);
 });
 
 app.get("/services/:id", async (req, res) => {
@@ -237,16 +261,22 @@ app.get("/services/:id", async (req, res) => {
     isActive: true,
   });
 
-  if (
-    !service ||
-    !validId(service.vendorId) ||
-    !(await getVendor(service.vendorId))
-  )
+  if (!service || !validId(service.vendorId))
     return res.status(404).send({ message: "Service not found" });
 
-  res.send(service);
-});
+  const vendor = await getVendor(service.vendorId);
 
+  if (!vendor)
+    return res.status(404).send({ message: "Service not found" });
+
+  res.send({
+    ...service,
+    vendor: {
+      name: vendor.name || "Wedding Vendor",
+      image: vendor.image || "",
+    },
+  });
+});
 // ==================== BOOKING CREATE ====================
 
 // ==================== CREATE BOOKING ====================
